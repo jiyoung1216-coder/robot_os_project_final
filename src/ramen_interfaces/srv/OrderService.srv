@@ -1,0 +1,15 @@
+# 요청 (Request)
+int32 table_number
+string ramen_type
+string[] toppings
+string[] sides
+string[] drinks
+float64 total_price
+string payment_method
+
+---
+
+# 응답 (Response)
+bool success
+string message
+int32 order_id

@@ -1,0 +1,12 @@
+# action/ServeRamen.action
+
+# Goal: 서빙할 음식과 목적지
+ramen_interfaces/CookedRamen food_to_serve
+---
+# Result: 배달 성공 여부
+bool delivery_success
+---
+# Feedback: 로봇의 현재 상태와 위치
+float32 current_x
+float32 current_y
+string status      # "delivering", "arrived", "returning"
