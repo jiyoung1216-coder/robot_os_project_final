@@ -36,7 +36,7 @@ class CounterNode(Node):
         order_id = self.order_count
         
         # ✅ 서버에서 성공/실패 결정 (80% 확률로 성공)
-        is_success = random.random() < 0.5
+        is_success = random.random() < 0.8
         
         response.success = is_success
         response.order_id = order_id
