@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import rclpy
 import random
+import sys
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+from rclpy.qos import QoSProfile
 from std_msgs.msg import String, Int32
 from ramen_interfaces.srv import OrderService
 
@@ -16,12 +17,14 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 
 
 class PaymentDialog(QDialog):
+    # 결제 완료 시그널 (성공했을 때만 발생)
     payment_completed = pyqtSignal(str)
     
-    def __init__(self, total_price, parent=None):
+    def __init__(self, total_price, parent_node, parent=None):
         super().__init__(parent)
         self.setWindowTitle('💳 결제')
         self.total_price = total_price
+        self.parent_node = parent_node  # ★ 추가: 메인 노드(서버 통신용) 저장
         self.payment_method = None
         self.setModal(True)
         
@@ -91,15 +94,16 @@ class PaymentDialog(QDialog):
     def process_payment(self):
         self.payment_method = '카드' if self.method_group.checkedId() == 0 else '현금'
         
-        progress_dialog = QDialog(self)
-        progress_dialog.setWindowTitle('⏳ 결제 처리중')
-        progress_dialog.setModal(True)
-        progress_dialog.setFixedSize(300, 150)
+        # 1. 로딩 UI 표시 (기존 유지)
+        self.progress_dialog = QDialog(self)
+        self.progress_dialog.setWindowTitle('⏳ 결제 처리중')
+        self.progress_dialog.setModal(True)
+        self.progress_dialog.setFixedSize(300, 150)
         
         progress_layout = QVBoxLayout()
         
         icon = '💳' if self.payment_method == '카드' else '💵'
-        progress_label = QLabel(f'{icon} {self.payment_method} 결제 처리중...')
+        progress_label = QLabel(f'{icon} {self.payment_method} 승인 요청 중...')
         progress_label.setAlignment(Qt.AlignCenter)
         progress_layout.addWidget(progress_label)
         
@@ -107,41 +111,50 @@ class PaymentDialog(QDialog):
         progress_bar.setRange(0, 0)
         progress_layout.addWidget(progress_bar)
         
-        progress_dialog.setLayout(progress_layout)
-        progress_dialog.show()
+        self.progress_dialog.setLayout(progress_layout)
+        self.progress_dialog.show()
         
-        QTimer.singleShot(2000, lambda: self.show_payment_result(progress_dialog))
+        # 2. ★ 수정: 2초 뒤에 '서버 요청 함수' 호출 (가짜 랜덤 X)
+        QTimer.singleShot(2000, self.send_request_to_server)
         
-    def show_payment_result(self, progress_dialog):
-        progress_dialog.close()
+    def send_request_to_server(self):
+        """메인 노드를 통해 서버로 서비스 요청"""
+        # 결과가 오면 show_payment_result를 실행하도록 콜백 전달
+        self.parent_node.request_payment_service(self.payment_method, self.show_payment_result)
+
+    def show_payment_result(self, response):
+        """서버 응답을 받아서 처리하는 함수"""
+        # 로딩창 닫기
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
         
-        success = random.random() < 0.8
-        
-        if success:
+        # 3. ★ 수정: 서버가 준 success 값 사용
+        if response.success:
             QMessageBox.information(self, '✅ 결제 성공', 
-                f'🎉 {self.payment_method} 결제가 완료되었습니다!\n감사합니다.')
+                f'🎉 {self.payment_method} 결제가 완료되었습니다!\n주문번호: {response.order_id}\n\n{response.message}')
             self.payment_completed.emit(self.payment_method)
-            self.accept()
+            self.accept() # 다이얼로그 닫기 (성공)
         else:
+            # 실패 시 에러 메시지 
             error_messages = [
+                f'❌ 서버 거절: {response.message}',
                 '⚠️ 카드 읽기 오류가 발생했습니다.',
-                '❌ 결제 승인이 거부되었습니다.',
+                '❌ 잔액이 부족합니다.',
                 '📡 네트워크 연결이 불안정합니다.',
-                '🔧 결제 시스템 오류가 발생했습니다.'
-            ] if self.payment_method == '카드' else [
-                '💸 금액이 부족합니다.',
-                '🪙 거스름돈 준비가 부족합니다.',
-                '💵 현금 인식 오류가 발생했습니다.'
+                '🔧 승인 시스템 응답 없음.'
             ]
             
             error_msg = random.choice(error_messages)
             reply = QMessageBox.warning(self, '❌ 결제 실패', 
-                f'{error_msg}\n다시 시도하시겠습니까?',
+                f'{error_msg}\n\n다시 시도하시겠습니까?',
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes)
             
             if reply == QMessageBox.Yes:
+                # 다시 시도 (재귀 호출처럼 처음부터 다시)
                 self.process_payment()
+            else:
+                pass
 
 
 class TableSelectionDialog(QDialog):
@@ -640,10 +653,12 @@ class TableOrder(Node, QMainWindow):
                 self.selected_table = table_dialog.selected_table
                 self.selected_order_type = table_dialog.order_type
                 
-                payment_dialog = PaymentDialog(self.total_price, self)
-                payment_dialog.payment_completed.connect(self.on_payment_completed)
+                # ★ 수정: 메인 노드(self)를 부모 노드로 전달하여 통신 가능하게 함
+                payment_dialog = PaymentDialog(self.total_price, self, self)
+                payment_dialog.payment_completed.connect(self.on_payment_success)
                 
-                if payment_dialog.exec_():
+                # 다이얼로그가 Accept 되면(결제 성공 시) 아래 로직 수행
+                if payment_dialog.exec_() == QDialog.Accepted:
                     pass
                 else:
                     self.selected_table = None
@@ -651,30 +666,34 @@ class TableOrder(Node, QMainWindow):
         else:
             self._warn('⚠️ 경고', '주문이 이미 확정되었습니다.')
 
-    def on_payment_completed(self, payment_method):
+    def on_payment_success(self, payment_method):
+        """다이얼로그에서 최종 성공 시그널을 받으면 호출"""
         self.payment_method = payment_method
         self.order_confirmed = True
-        
-        # 서비스 서버 확인
-        if not self.order_client.wait_for_service(timeout_sec=2.0):
-            QMessageBox.warning(self, '⚠️ 연결 실패', '카운터 시스템에 연결할 수 없습니다.\n카운터 노드가 실행 중인지 확인해주세요.')
-            self.order_confirmed = False
+        self.order_status_label.setText(f'✅ 주문 완료 (방식: {payment_method})')
+        self._reset_order()
+
+    def request_payment_service(self, method, callback_func):
+        """
+        ★ 추가: PaymentDialog가 호출하는 함수.
+        ROS 서비스를 통해 카운터 노드에 결제 승인 요청을 보냄.
+        """
+        # 서비스 연결 확인
+        if not self.order_client.wait_for_service(timeout_sec=1.0):
+            # 연결 실패 시 가짜 실패 객체 만들어서 콜백 호출
+            class FailObj: success = False; message = "서버 연결 실패"
+            callback_func(FailObj)
             return
-        
-        ramen_orders = [detail for detail in self.order_details if detail['type'] == 'ramen']
-        side_orders = [detail for detail in self.order_details if detail['type'] == 'side']
-        drink_orders = [detail for detail in self.order_details if detail['type'] == 'drink']
-        
-        sides_list = [item['name'] for item in side_orders]
-        drinks_list = [item['name'] for item in drink_orders]
-        
-        # 서비스 요청 생성
+
+        # 요청 데이터 생성
         request = OrderService.Request()
         request.table_number = int(self.selected_table)
         request.total_price = float(self.total_price)
-        request.payment_method = 'card' if payment_method == '카드' else 'cash'
-        request.sides = sides_list
-        request.drinks = drinks_list
+        request.payment_method = 'card' if method == '카드' else 'cash'
+        
+        ramen_orders = [d for d in self.order_details if d['type'] == 'ramen']
+        request.sides = [d['name'] for d in self.order_details if d['type'] == 'side']
+        request.drinks = [d['name'] for d in self.order_details if d['type'] == 'drink']
         
         if ramen_orders:
             request.ramen_type = ramen_orders[0]['name']
@@ -682,28 +701,21 @@ class TableOrder(Node, QMainWindow):
         else:
             request.ramen_type = "없음"
             request.toppings = []
-        
-        # 서비스 호출
-        future = self.order_client.call_async(request)
-        future.add_done_callback(self.order_response_callback)
-        
-        self.order_status_label.setText('📡 주문 전송 중...')
 
-    def order_response_callback(self, future):
+        # 비동기 호출
+        future = self.order_client.call_async(request)
+        
+        # 콜백 연결 (lambda를 사용하여 다이얼로그의 함수 callback_func에 결과 전달)
+        future.add_done_callback(lambda f: self._service_response_handler(f, callback_func))
+
+    def _service_response_handler(self, future, callback_func):
         try:
             response = future.result()
-            if response.success:
-                self.get_logger().info(f'✅ 주문 접수 완료! 주문번호: {response.order_id}')
-                QMessageBox.information(self, '✅ 주문 완료', 
-                    f'🎉 {response.message}\n📋 주문번호: {response.order_id}\n💳 결제 방식: {self.payment_method}')
-                self._reset_order()
-            else:
-                QMessageBox.warning(self, '❌ 주문 실패', response.message)
-                self.order_confirmed = False
+            # 다이얼로그의 show_payment_result 함수 호출
+            callback_func(response)
         except Exception as e:
-            self.get_logger().error(f'서비스 호출 실패: {e}')
-            QMessageBox.warning(self, '❌ 오류', f'주문 처리 중 오류가 발생했습니다.\n{e}')
-            self.order_confirmed = False
+            class FailObj: success = False; message = str(e)
+            callback_func(FailObj)
 
     def _reset_order(self):
         self.orders.clear()
